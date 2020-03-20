@@ -4,10 +4,9 @@
 extern crate midir;
 extern crate futures;
 
-
-
 use futures::channel::mpsc;
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
+use std::cmp;
 
 // These get reported like:
 // FL STUDIO FIRE:FL STUDIO FIRE MIDI 1 32:0
@@ -27,6 +26,7 @@ enum ControllerState {
 
 /// Controller Buttons, Left-to-right, Top-to-bottom, first non-shifted label
 /// associated with the button except for the grid row buttons.
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum ControllerButton {
     // ## Top Row
     // "Channel"/"Mixer"/"User 1"/"User 2"
@@ -56,6 +56,7 @@ pub enum ControllerButton {
     Mystery,
 }
 
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum ControllerKnob {
     Volume,
     Pan,
@@ -64,11 +65,13 @@ pub enum ControllerKnob {
     Select,
 }
 
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum ButtonState {
     Down,
     Up
 }
 
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum ControllerEvent {
     ControlButton(ControllerButton, ButtonState),
     KnobTurn(ControllerKnob, u8),
@@ -150,7 +153,10 @@ impl ControllerEvent {
 
 pub struct FireController {
     state: ControllerState,
-    event_rx: Option<mpsc::UnboundedReceiver<ControllerEvent>>
+    event_rx: Option<mpsc::UnboundedReceiver<ControllerEvent>>,
+
+    // 7 header bytes + (4 bytes per grid led * 64 leds) + 1 end byte.
+    led_msg_buf: [u8; 7 + 4 * 64 + 1],
 }
 
 
@@ -209,16 +215,52 @@ impl FireController {
             }).unwrap();
             let out_conn = midi_out.connect(&out_port, "fire-out").unwrap();
 
-            controllers.push(FireController {
+            let mut controller = FireController {
                 state: ControllerState::Connected(ConnectedController {
                     in_conn,
                     out_conn,
                 }),
                 event_rx: Some(rx),
-            });
+                led_msg_buf: [0; 264],
+            };
+            controller.init();
+            controllers.push(controller);
         }
 
         controllers
+    }
+
+    /// Initializes any pre-allocated buffers.
+    fn init(&mut self) {
+        let len: u16 = 4 * 64;
+        self.led_msg_buf[0..7].copy_from_slice(
+            &[0xf0, 0x47, 0x7f, 0x43, 0x65, ((len >> 7)&0x7f) as u8, (len&0x7f) as u8]);
+
+        // The first byte of each 4-byte tuple is the index of the button to
+        // update.
+        for i in 0..64 {
+            self.led_msg_buf[7 + i * 4] = i as u8;
+        }
+        self.led_msg_buf[self.led_msg_buf.len() - 1] = 0xf7;
+    }
+
+
+    /// Do a basic 4x4 color cube cut into 4 slices.
+    fn set_color_cube(&mut self) {
+        for i in 0..64 {
+            let x: u8 = i % 4;
+            let y: u8 = i / 16;
+            let z: u8 = (i % 16) / 4;
+            self.led_msg_buf[7 + (i as usize) * 4 + 1] = cmp::min(0x7f, x * 0x20);
+            self.led_msg_buf[7 + (i as usize) * 4 + 2] = cmp::min(0x7f, y * 0x20);
+            self.led_msg_buf[7 + (i as usize) * 4 + 3] = cmp::min(0x7f, z * 0x20);
+        }
+    }
+
+    pub fn update_leds(&mut self) {
+        if let ControllerState::Connected(cs) = &mut self.state {
+            cs.out_conn.send(&self.led_msg_buf).unwrap();
+        }
     }
 }
 
@@ -226,8 +268,7 @@ fn main() {
     let mut controllers = FireController::attach_to_all();
 
     for c in controllers.iter_mut() {
-        if let ControllerState::Connected(cs) = &mut c.state {
-            cs.out_conn.send(&[0xf0, 0x47, 0x7f, 0x43, 0x65, 0, 4, 0, 0x7f, 0x7f, 0x7f, 0xf7]).unwrap();
-        }
+        c.set_color_cube();
+        c.update_leds();
     }
 }

@@ -2,11 +2,13 @@
 #![feature(or_patterns)]
 
 extern crate midir;
-extern crate futures;
+extern crate tokio;
 
-use futures::channel::mpsc;
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
-use std::cmp;
+use std::cmp::{Eq, PartialEq, min};
+use std::hash::{Hash, Hasher};
+use tokio::stream::{StreamExt, StreamMap};
+use tokio::sync::mpsc;
 
 // These get reported like:
 // FL STUDIO FIRE:FL STUDIO FIRE MIDI 1 32:0
@@ -152,13 +154,16 @@ impl ControllerEvent {
 }
 
 pub struct FireController {
+    /// Identifier for the controller.  Ideally this would be the serial number
+    /// of the device extracted via sysex or the USB path to the device.  Right
+    /// now it's just a one-up.
+    id: u32,
     state: ControllerState,
-    event_rx: Option<mpsc::UnboundedReceiver<ControllerEvent>>,
+    event_rx: Option<mpsc::Receiver<ControllerEvent>>,
 
     // 7 header bytes + (4 bytes per grid led * 64 leds) + 1 end byte.
     led_msg_buf: [u8; 7 + 4 * 64 + 1],
 }
-
 
 
 impl FireController {
@@ -185,11 +190,11 @@ impl FireController {
             }
         }).collect();
 
-        for desired_name in desired_names {
+        for (i, desired_name) in desired_names.into_iter().enumerate() {
             let midi_in = MidiInput::new("Fire-Walk").unwrap();
             let midi_out = MidiOutput::new("Fire").unwrap();
 
-            let (tx, rx) = mpsc::unbounded::<ControllerEvent>();
+            let (mut tx, mut rx) = mpsc::channel::<ControllerEvent>(100);
 
             let in_port = midi_in.ports().into_iter().find_map(|p| {
                 if midi_in.port_name(&p).unwrap() == desired_name {
@@ -201,7 +206,7 @@ impl FireController {
             let in_conn = midi_in.connect(
                 &in_port, "fire-in", move |_stamp, msg, _| {
                     if let Some(event) = ControllerEvent::from_midi(msg) {
-                        tx.unbounded_send(event).expect("Send exploded");
+                        tx.try_send(event).expect("Send exploded");
                     }
                 }, ()).unwrap();
 
@@ -216,6 +221,7 @@ impl FireController {
             let out_conn = midi_out.connect(&out_port, "fire-out").unwrap();
 
             let mut controller = FireController {
+                id: i as u32,
                 state: ControllerState::Connected(ConnectedController {
                     in_conn,
                     out_conn,
@@ -246,15 +252,21 @@ impl FireController {
 
 
     /// Do a basic 4x4 color cube cut into 4 slices.
-    fn set_color_cube(&mut self) {
+    pub fn set_color_cube(&mut self) {
         for i in 0..64 {
             let x: u8 = i % 4;
             let y: u8 = i / 16;
             let z: u8 = (i % 16) / 4;
-            self.led_msg_buf[7 + (i as usize) * 4 + 1] = cmp::min(0x7f, x * 0x20);
-            self.led_msg_buf[7 + (i as usize) * 4 + 2] = cmp::min(0x7f, y * 0x20);
-            self.led_msg_buf[7 + (i as usize) * 4 + 3] = cmp::min(0x7f, z * 0x20);
+            self.led_msg_buf[7 + (i as usize) * 4 + 1] = min(0x7f, x * 0x20);
+            self.led_msg_buf[7 + (i as usize) * 4 + 2] = min(0x7f, y * 0x20);
+            self.led_msg_buf[7 + (i as usize) * 4 + 3] = min(0x7f, z * 0x20);
         }
+    }
+
+    pub fn set_led(&mut self, i: u8, r: u8, g: u8, b: u8) {
+        self.led_msg_buf[7 + (i as usize) * 4 + 1] = min(0x7f, r);
+        self.led_msg_buf[7 + (i as usize) * 4 + 2] = min(0x7f, g);
+        self.led_msg_buf[7 + (i as usize) * 4 + 3] = min(0x7f, b);
     }
 
     pub fn update_leds(&mut self) {
@@ -264,11 +276,49 @@ impl FireController {
     }
 }
 
-fn main() {
+impl Hash for FireController {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl Eq for FireController {}
+
+impl PartialEq for FireController {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+#[tokio::main]
+async fn main() {
     let mut controllers = FireController::attach_to_all();
 
-    for c in controllers.iter_mut() {
+    let mut map = StreamMap::new();
+
+    for (i, c) in controllers.iter_mut().enumerate() {
         c.set_color_cube();
         c.update_leds();
+
+        if let Some(rx) = c.event_rx.take() {
+            map.insert(i, rx);
+        }
     }
+
+    while let Some((i, evt)) = map.next().await {
+        let c = controllers.get_mut(i).unwrap();
+        match evt {
+            ControllerEvent::GridButton(idx, _, _, ButtonState::Down, _) => {
+                c.set_led(idx, 0x7f, 0x7f, 0x7f);
+                c.update_leds();
+            },
+            ControllerEvent::GridButton(idx, _, _, ButtonState::Up, _) => {
+                c.set_led(idx, 0, 0, 0);
+                c.update_leds();
+            },
+            _ => ()
+        }
+    }
+
+    ()
 }

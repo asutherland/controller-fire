@@ -9,4 +9,4 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 midir = { git = "https://github.com/Boddlnagg/midir.git", rev="14a3e17f486739586c7614b75900ff4143b88084" }
-futures = "0.3.4"
+tokio = { version = "0.2.13", features = ["full"] }

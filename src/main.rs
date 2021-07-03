@@ -10,11 +10,15 @@ use std::hash::{Hash, Hasher};
 use tokio::stream::{StreamExt, StreamMap};
 use tokio::sync::mpsc;
 
-// These get reported like:
+// These get reported like so on Linux:
 // FL STUDIO FIRE:FL STUDIO FIRE MIDI 1 32:0
 // FL STUDIO FIRE:FL STUDIO FIRE MIDI 1 36:0
-pub const MIDI_INPUT_PORT_PREFIX: &'static str = "FL STUDIO FIRE:FL STUDIO FIRE MIDI 1 ";
-pub const MIDI_OUTPUT_PORT_PREFIX: &'static str = "FL STUDIO FIRE:FL STUDIO FIRE MIDI 1 ";
+//
+// And on Windows:
+// FL STUDIO FIRE
+// FL STUDIO FIRE
+pub const MIDI_INPUT_PORT_PREFIX: &'static str = "FL STUDIO FIRE"; //:FL STUDIO FIRE MIDI 1 ";
+pub const MIDI_OUTPUT_PORT_PREFIX: &'static str = "FL STUDIO FIRE"; //:FL STUDIO FIRE MIDI 1 ";
 
 struct ConnectedController {
     in_conn: MidiInputConnection<()>,
